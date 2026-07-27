@@ -77,6 +77,48 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createJoinCoordinator(joinDelayMs) {
+  let chain = Promise.resolve();
+  let nextAllowedJoinAt = Date.now();
+  let lastSuccessfulJoinAt = 0;
+
+  function scheduleJoin(label, reason, earliestJoinAt, connectFn) {
+    chain = chain
+      .then(async () => {
+        const now = Date.now();
+        const retryReadyAt = Number(earliestJoinAt) || now;
+        const successGateAt = lastSuccessfulJoinAt
+          ? lastSuccessfulJoinAt + joinDelayMs
+          : now;
+        const scheduledAt = Math.max(nextAllowedJoinAt, retryReadyAt, successGateAt);
+        const waitMs = Math.max(0, scheduledAt - now);
+
+        if (waitMs > 0) {
+          logLine(`Waiting ${waitMs}ms before ${reason}`, label);
+          await sleep(waitMs);
+        }
+
+        nextAllowedJoinAt = Date.now() + joinDelayMs;
+        connectFn();
+      })
+      .catch((err) => {
+        logLine(`Join scheduling error: ${err.message}`, label);
+      });
+
+    return chain;
+  }
+
+  function markSuccessfulJoin() {
+    lastSuccessfulJoinAt = Date.now();
+    nextAllowedJoinAt = Math.max(nextAllowedJoinAt, lastSuccessfulJoinAt + joinDelayMs);
+  }
+
+  return {
+    scheduleJoin,
+    markSuccessfulJoin
+  };
+}
+
 function randomYaw() {
   return Math.random() * Math.PI * 2;
 }
@@ -122,11 +164,12 @@ function setupAfk(bot, afkConfig) {
   return () => timers.forEach((timer) => clearInterval(timer));
 }
 
-function createAndManageBot(account, config, activeBots) {
+function createAndManageBot(account, config, activeBots, joinCoordinator) {
   const label = account.username;
   let hasRunFirstJoinCommands = false;
+  const reconnectDelayMs = Number(config.reconnectDelayMs) || 5000;
 
-  const connect = () => {
+  const connect = (reason = "join attempt") => {
     logLine("Connecting...", label);
 
     const bot = mineflayer.createBot({
@@ -141,6 +184,7 @@ function createAndManageBot(account, config, activeBots) {
 
     bot.once("spawn", async () => {
       logLine("Spawned in world", label);
+      joinCoordinator.markSuccessfulJoin();
       activeBots.set(label, bot);
       cleanupAfk = setupAfk(bot, config.afk);
 
@@ -176,12 +220,17 @@ function createAndManageBot(account, config, activeBots) {
       if (activeBots.get(label) === bot) {
         activeBots.delete(label);
       }
-      logLine(`Disconnected. Reconnecting in ${config.reconnectDelayMs || 5000}ms...`, label);
-      setTimeout(connect, config.reconnectDelayMs || 5000);
+      logLine(`Disconnected. Queueing reconnect (base delay ${reconnectDelayMs}ms)...`, label);
+      joinCoordinator.scheduleJoin(
+        label,
+        "reconnect",
+        Date.now() + reconnectDelayMs,
+        () => connect("reconnect")
+      );
     });
   };
 
-  connect();
+  joinCoordinator.scheduleJoin(label, "initial join", Date.now(), () => connect("initial join"));
 }
 
 function setupConsoleChat(activeBots) {
@@ -212,8 +261,9 @@ function setupConsoleChat(activeBots) {
 
 async function main() {
   const config = loadConfig();
-  const joinDelay = config.joinDelayMs || 1000;
+  const joinDelay = Number(config.joinDelayMs) || 3000;
   const activeBots = new Map();
+  const joinCoordinator = createJoinCoordinator(joinDelay);
 
   logLine(
     `Starting ${config.accounts.length} bot(s) -> ${config.server.host}:${config.server.port || 25565} | version ${config.server.version || "auto"}`
@@ -226,10 +276,7 @@ async function main() {
       `Launching bot ${i + 1}/${config.accounts.length}`,
       config.accounts[i].username
     );
-    createAndManageBot(config.accounts[i], config, activeBots);
-    if (i < config.accounts.length - 1) {
-      await sleep(joinDelay);
-    }
+    createAndManageBot(config.accounts[i], config, activeBots, joinCoordinator);
   }
 }
 
