@@ -1,0 +1,14 @@
+{
+  "name": "shadowedleaves-afk-client",
+  "version": "1.0.0",
+  "description": "AFK Console Client",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "mineflayer": "^4.33.0"
+  }
+}

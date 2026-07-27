@@ -1,0 +1,24 @@
+{
+  "server": {
+    "host": "example.com",
+    "port": 25565,
+    "version": "1.18"
+  },
+  "joinDelayMs": 3000,
+  "reconnectDelayMs": 5000,
+  "accountsFile": "usernames.txt",
+  "defaultAuth": "offline",
+  "afk": {
+    "enabled": true,
+    "jumpEveryMs": 15000,
+    "lookAroundEveryMs": 12000,
+    "chatEveryMs": 0,
+    "chatMessage": ""
+  },
+  "accounts": [],
+  "onSpawnCommandDelayMs": 3000,
+  "onSpawnCommands": [
+    "/register password password",
+    "/login password password"
+  ]
+}
