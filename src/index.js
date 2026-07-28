@@ -6,6 +6,7 @@ require("dotenv").config();
 
 const ROOT = process.cwd();
 const CONFIG_PATH = path.join(ROOT, "config.json");
+const USERNAME_FILE_PATH = path.join(ROOT, "usernames.txt");
 let activeReadline = null;
 
 function printLineWithoutBreakingInput(text) {
@@ -44,25 +45,18 @@ function logLine(message, label = "SYSTEM") {
   printLineWithoutBreakingInput(parts.join(" "));
 }
 
-function loadAccountsFromFile(filePath, defaultAuth) {
-  const absolute = path.isAbsolute(filePath)
-    ? filePath
-    : path.join(ROOT, filePath);
-
-  if (!fs.existsSync(absolute)) {
-    throw new Error(`Accounts file not found: ${absolute}`);
+function loadAccountsFromFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Accounts file not found: ${filePath}`);
   }
 
   const lines = fs
-    .readFileSync(absolute, "utf8")
+    .readFileSync(filePath, "utf8")
     .split(/\r?\n/g)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
 
-  return lines.map((username) => ({
-    username,
-    auth: defaultAuth || "offline"
-  }));
+  return lines.map((username) => ({ username }));
 }
 
 function loadConfig() {
@@ -78,16 +72,11 @@ function loadConfig() {
   if (!config.server?.host) {
     throw new Error("config.server.host is required.");
   }
-  if (config.accountsFile) {
-    const parsed = loadAccountsFromFile(
-      config.accountsFile,
-      config.defaultAuth || "offline"
-    );
-    config.accounts = parsed;
-  }
+
+  config.accounts = loadAccountsFromFile(USERNAME_FILE_PATH);
 
   if (!Array.isArray(config.accounts) || config.accounts.length === 0) {
-    throw new Error("config.accounts must contain at least one account.");
+    throw new Error("usernames.txt must contain at least one username.");
   }
 
   return config;
@@ -294,7 +283,7 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
       host: config.server.host,
       port: config.server.port || 25565,
       username: account.username,
-      auth: account.auth || "offline",
+      auth: "offline",
       version: config.server.version || false
     });
 

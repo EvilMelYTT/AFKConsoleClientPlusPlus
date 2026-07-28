@@ -9,8 +9,6 @@
   "consoleCommandDelayMs": 3000,
   "clickSlotDelayMs": 1000,
   "chatDisplayDelayMs": 3000,
-  "accountsFile": "usernames.txt",
-  "defaultAuth": "offline",
   "afk": {
     "enabled": true,
     "jumpEveryMs": 15000,
@@ -18,7 +16,6 @@
     "chatEveryMs": 0,
     "chatMessage": ""
   },
-  "accounts": [],
   "onSpawnCommandDelayMs": 3000,
   "onSpawnCommands": [
     "/register password password",
