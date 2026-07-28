@@ -6,6 +6,26 @@ require("dotenv").config();
 
 const ROOT = process.cwd();
 const CONFIG_PATH = path.join(ROOT, "config.json");
+let activeReadline = null;
+
+function printLineWithoutBreakingInput(text) {
+  if (!activeReadline || !activeReadline.terminal) {
+    process.stdout.write(`${text}\n`);
+    return;
+  }
+
+  const currentInput = activeReadline.line || "";
+  const cursorPosition = Number(activeReadline.cursor) || 0;
+
+  readline.clearLine(process.stdout, 0);
+  readline.cursorTo(process.stdout, 0);
+  process.stdout.write(`${text}\n`);
+  process.stdout.write(currentInput);
+
+  if (cursorPosition < currentInput.length) {
+    readline.moveCursor(process.stdout, cursorPosition - currentInput.length, 0);
+  }
+}
 
 function timestamp() {
   const now = new Date();
@@ -21,7 +41,7 @@ function timestamp() {
 function logLine(message, label = "SYSTEM") {
   const parts = [`[${timestamp()}]`, `[${label}]`];
   parts.push(message);
-  console.log(parts.join(" "));
+  printLineWithoutBreakingInput(parts.join(" "));
 }
 
 function loadAccountsFromFile(filePath, defaultAuth) {
@@ -375,6 +395,7 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs) {
     input: process.stdin,
     output: process.stdout
   });
+  activeReadline = rl;
 
   let sendQueue = Promise.resolve();
 
