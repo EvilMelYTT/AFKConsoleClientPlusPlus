@@ -77,6 +77,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function toNonNegativeNumber(value, fallback) {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return parsed;
+  }
+  return fallback;
+}
+
+function parseSlotNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+}
+
+function getSlotItemName(item) {
+  if (!item) return "empty";
+  return item.customName || item.displayName || item.name || "unknown";
+}
+
 async function runCommandsWithDelay(bot, label, commands, delayMs, logPrefix = "Sent") {
   if (!Array.isArray(commands) || !commands.length) return;
   const waitBetweenCommandsMs = Math.max(0, Number(delayMs) || 0);
@@ -349,7 +370,7 @@ function setupPeriodicCommands(activeBots, periodicCommandsConfig) {
   return () => clearInterval(timer);
 }
 
-function setupConsoleChat(activeBots, sendDelayMs) {
+function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -357,8 +378,106 @@ function setupConsoleChat(activeBots, sendDelayMs) {
 
   let sendQueue = Promise.resolve();
 
+  async function runLocalCommand(message, clickSlotDelayMs) {
+    const parts = message.split(/\s+/g).filter(Boolean);
+    const command = (parts[0] || "").toLowerCase();
+
+    if (command === ".send") {
+      const username = parts[1];
+      const outgoingMessage = parts.slice(2).join(" ");
+      if (!username || !outgoingMessage) {
+        logLine("Usage: .send <username> <message>");
+        return;
+      }
+
+      const bot = activeBots.get(username);
+      if (!bot) {
+        logLine(`No active bot found with username "${username}".`);
+        return;
+      }
+
+      try {
+        bot.chat(outgoingMessage);
+        logLine(`Sent command from ${username}: ${outgoingMessage}`);
+      } catch (err) {
+        logLine(`Failed to send from ${username}: ${err.message}`);
+      }
+      return;
+    }
+
+    if (command === ".clickslot") {
+      const slot = parseSlotNumber(parts[1]);
+      if (slot === null) {
+        logLine("Usage: .clickslot <slotNumber>");
+        return;
+      }
+
+      const targets = Array.from(activeBots.entries());
+      if (!targets.length) {
+        logLine("No active bots available for .clickslot");
+        return;
+      }
+
+      logLine(
+        `Clicking slot ${slot} for ${targets.length} bot(s) with ${clickSlotDelayMs}ms spacing.`
+      );
+
+      let clickedCount = 0;
+      for (let i = 0; i < targets.length; i += 1) {
+        const [username, bot] = targets[i];
+        if (!bot.currentWindow) {
+          logLine(`Cannot click slot ${slot}: no open menu window.`, username);
+        } else {
+          try {
+            await bot.clickWindow(slot, 0, 0);
+            clickedCount += 1;
+            logLine(`Clicked slot ${slot} (${clickedCount}/${targets.length}).`, username);
+          } catch (err) {
+            logLine(`Slot click failed: ${err.message}`, username);
+          }
+        }
+
+        if (i < targets.length - 1) {
+          await sleep(clickSlotDelayMs);
+        }
+      }
+
+      logLine(`.clickslot completed: ${clickedCount}/${targets.length} bot(s).`);
+      return;
+    }
+
+    if (command === ".checkslot") {
+      const slot = parseSlotNumber(parts[1]);
+      if (slot === null) {
+        logLine("Usage: .checkslot <slotNumber>");
+        return;
+      }
+
+      const targets = Array.from(activeBots.entries());
+      if (!targets.length) {
+        logLine("No active bots available for .checkslot");
+        return;
+      }
+
+      for (const [username, bot] of targets) {
+        if (!bot.currentWindow) {
+          logLine(`Slot ${slot}: no open menu window.`, username);
+          continue;
+        }
+
+        const item = bot.currentWindow.slots?.[slot];
+        logLine(`Slot ${slot}: ${getSlotItemName(item)}`, username);
+      }
+      return;
+    }
+
+    logLine(
+      `Unknown local command: ${parts[0]}. Supported: .clickslot, .checkslot, .send`
+    );
+  }
+
   logLine(
-    `Type a message and press Enter to send from connected bots (staggered ${sendDelayMs}ms per account).`
+    `Type a message and press Enter to send from connected bots (staggered ${sendDelayMs}ms per account). Local commands: .clickslot, .checkslot, .send`
   );
 
   rl.on("line", (line) => {
@@ -367,6 +486,11 @@ function setupConsoleChat(activeBots, sendDelayMs) {
 
     sendQueue = sendQueue
       .then(async () => {
+        if (message.startsWith(".")) {
+          await runLocalCommand(message, clickSlotDelayMs);
+          return;
+        }
+
         const targets = Array.from(activeBots.entries());
         if (!targets.length) {
           logLine(`No active bots available for: ${message}`);
@@ -403,9 +527,10 @@ function setupConsoleChat(activeBots, sendDelayMs) {
 
 async function main() {
   const config = loadConfig();
-  const joinDelay = Number(config.joinDelayMs) || 3000;
-  const consoleCommandDelayMs = Number(config.consoleCommandDelayMs) || 3000;
-  const chatDisplayDelayMs = Number(config.chatDisplayDelayMs) || 3000;
+  const joinDelay = toNonNegativeNumber(config.joinDelayMs, 3000);
+  const consoleCommandDelayMs = toNonNegativeNumber(config.consoleCommandDelayMs, 3000);
+  const clickSlotDelayMs = toNonNegativeNumber(config.clickSlotDelayMs, 1000);
+  const chatDisplayDelayMs = toNonNegativeNumber(config.chatDisplayDelayMs, 3000);
   const periodicCommandsConfig = getPeriodicCommandsConfig(config);
   const activeBots = new Map();
   const joinCoordinator = createJoinCoordinator(joinDelay);
@@ -415,8 +540,9 @@ async function main() {
     `Starting ${config.accounts.length} bot(s) -> ${config.server.host}:${config.server.port || 25565} | version ${config.server.version || "auto"}`
   );
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
+  logLine(`Local .clickslot delay: ${clickSlotDelayMs}ms between bots`);
   logLine(`Chat display delay: ${chatDisplayDelayMs}ms (duplicates combined)`);
-  setupConsoleChat(activeBots, consoleCommandDelayMs);
+  setupConsoleChat(activeBots, consoleCommandDelayMs, clickSlotDelayMs);
   setupPeriodicCommands(activeBots, periodicCommandsConfig);
 
   for (let i = 0; i < config.accounts.length; i += 1) {
