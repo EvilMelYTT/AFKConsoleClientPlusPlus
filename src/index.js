@@ -370,7 +370,7 @@ function setupPeriodicCommands(activeBots, periodicCommandsConfig) {
   return () => clearInterval(timer);
 }
 
-function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
+function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -378,7 +378,7 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
 
   let sendQueue = Promise.resolve();
 
-  async function runLocalCommand(message, clickSlotDelayMs) {
+  async function runLocalCommand(message) {
     const parts = message.split(/\s+/g).filter(Boolean);
     const command = (parts[0] || "").toLowerCase();
 
@@ -407,8 +407,36 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
 
     if (command === ".clickslot") {
       const slot = parseSlotNumber(parts[1]);
+      const username = parts[2];
+
+      if (!parts[1]) {
+        logLine("Usage: .clickslot <slotNumber> [username]");
+        return;
+      }
+
       if (slot === null) {
-        logLine("Usage: .clickslot <slotNumber>");
+        logLine("Usage: .clickslot <slotNumber> [username]");
+        return;
+      }
+
+      if (username) {
+        const bot = activeBots.get(username);
+        if (!bot) {
+          logLine(`No active bot found with username "${username}".`);
+          return;
+        }
+
+        if (!bot.currentWindow) {
+          logLine(`Cannot click slot ${slot}: no open menu window.`, username);
+          return;
+        }
+
+        try {
+          await bot.clickWindow(slot, 0, 0);
+          logLine(`Clicked slot ${slot}.`, username);
+        } catch (err) {
+          logLine(`Slot click failed: ${err.message}`, username);
+        }
         return;
       }
 
@@ -424,16 +452,16 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
 
       let clickedCount = 0;
       for (let i = 0; i < targets.length; i += 1) {
-        const [username, bot] = targets[i];
+        const [targetUsername, bot] = targets[i];
         if (!bot.currentWindow) {
-          logLine(`Cannot click slot ${slot}: no open menu window.`, username);
+          logLine(`Cannot click slot ${slot}: no open menu window.`, targetUsername);
         } else {
           try {
             await bot.clickWindow(slot, 0, 0);
             clickedCount += 1;
-            logLine(`Clicked slot ${slot} (${clickedCount}/${targets.length}).`, username);
+            logLine(`Clicked slot ${slot} (${clickedCount}/${targets.length}).`, targetUsername);
           } catch (err) {
-            logLine(`Slot click failed: ${err.message}`, username);
+            logLine(`Slot click failed: ${err.message}`, targetUsername);
           }
         }
 
@@ -448,8 +476,32 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
 
     if (command === ".checkslot") {
       const slot = parseSlotNumber(parts[1]);
+      const username = parts[2];
+
+      if (!parts[1]) {
+        logLine("Usage: .checkslot <slotNumber> [username]");
+        return;
+      }
+
       if (slot === null) {
-        logLine("Usage: .checkslot <slotNumber>");
+        logLine("Usage: .checkslot <slotNumber> [username]");
+        return;
+      }
+
+      if (username) {
+        const bot = activeBots.get(username);
+        if (!bot) {
+          logLine(`No active bot found with username "${username}".`);
+          return;
+        }
+
+        if (!bot.currentWindow) {
+          logLine(`Slot ${slot}: no open menu window.`, username);
+          return;
+        }
+
+        const item = bot.currentWindow.slots?.[slot];
+        logLine(`Slot ${slot}: ${getSlotItemName(item)}`, username);
         return;
       }
 
@@ -459,14 +511,14 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
         return;
       }
 
-      for (const [username, bot] of targets) {
+      for (const [targetUsername, bot] of targets) {
         if (!bot.currentWindow) {
-          logLine(`Slot ${slot}: no open menu window.`, username);
+          logLine(`Slot ${slot}: no open menu window.`, targetUsername);
           continue;
         }
 
         const item = bot.currentWindow.slots?.[slot];
-        logLine(`Slot ${slot}: ${getSlotItemName(item)}`, username);
+        logLine(`Slot ${slot}: ${getSlotItemName(item)}`, targetUsername);
       }
       return;
     }
@@ -487,7 +539,7 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs = 1000) {
     sendQueue = sendQueue
       .then(async () => {
         if (message.startsWith(".")) {
-          await runLocalCommand(message, clickSlotDelayMs);
+          await runLocalCommand(message);
           return;
         }
 
@@ -540,7 +592,7 @@ async function main() {
     `Starting ${config.accounts.length} bot(s) -> ${config.server.host}:${config.server.port || 25565} | version ${config.server.version || "auto"}`
   );
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
-  logLine(`Local .clickslot delay: ${clickSlotDelayMs}ms between bots`);
+  logLine(`Local .clickslot all-bots delay: ${clickSlotDelayMs}ms`);
   logLine(`Chat display delay: ${chatDisplayDelayMs}ms (duplicates combined)`);
   setupConsoleChat(activeBots, consoleCommandDelayMs, clickSlotDelayMs);
   setupPeriodicCommands(activeBots, periodicCommandsConfig);
