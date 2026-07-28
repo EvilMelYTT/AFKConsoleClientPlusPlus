@@ -77,6 +77,40 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createChatRelay(dedupeWindowMs = 1500) {
+  const recentMessages = new Map();
+
+  function cleanup(now) {
+    for (const [key, seenAt] of recentMessages.entries()) {
+      if (now - seenAt > dedupeWindowMs) {
+        recentMessages.delete(key);
+      }
+    }
+  }
+
+  function handleChat(username, message) {
+    const now = Date.now();
+    cleanup(now);
+
+    const normalizedUser = String(username || "").trim();
+    const normalizedMessage = String(message || "").trim();
+    if (!normalizedMessage) return;
+
+    const dedupeKey = `${normalizedUser}|${normalizedMessage}`;
+    const seenAt = recentMessages.get(dedupeKey);
+    if (seenAt && now - seenAt <= dedupeWindowMs) {
+      return;
+    }
+
+    recentMessages.set(dedupeKey, now);
+    logLine(`<${normalizedUser}> ${normalizedMessage}`, "CHAT");
+  }
+
+  return {
+    handleChat
+  };
+}
+
 function createJoinCoordinator(joinDelayMs) {
   let chain = Promise.resolve();
   let nextAllowedJoinAt = Date.now();
@@ -164,7 +198,7 @@ function setupAfk(bot, afkConfig) {
   return () => timers.forEach((timer) => clearInterval(timer));
 }
 
-function createAndManageBot(account, config, activeBots, joinCoordinator) {
+function createAndManageBot(account, config, activeBots, joinCoordinator, chatRelay) {
   const label = account.username;
   let hasRunFirstJoinCommands = false;
   const reconnectDelayMs = Number(config.reconnectDelayMs) || 5000;
@@ -215,6 +249,10 @@ function createAndManageBot(account, config, activeBots, joinCoordinator) {
       logLine(`Error: ${err.message}`, label);
     });
 
+    bot.on("chat", (username, message) => {
+      chatRelay.handleChat(username, message);
+    });
+
     bot.on("end", () => {
       cleanupAfk();
       if (activeBots.get(label) === bot) {
@@ -233,50 +271,79 @@ function createAndManageBot(account, config, activeBots, joinCoordinator) {
   joinCoordinator.scheduleJoin(label, "initial join", Date.now(), () => connect("initial join"));
 }
 
-function setupConsoleChat(activeBots) {
+function setupConsoleChat(activeBots, sendDelayMs) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
   });
 
-  logLine("Type a message and press Enter to send from all connected bots.");
+  let sendQueue = Promise.resolve();
+
+  logLine(
+    `Type a message and press Enter to send from connected bots (staggered ${sendDelayMs}ms per account).`
+  );
 
   rl.on("line", (line) => {
     const message = String(line || "").trim();
     if (!message) return;
 
-    let sentCount = 0;
-    for (const [username, bot] of activeBots.entries()) {
-      try {
-        bot.chat(message);
-        sentCount += 1;
-      } catch (err) {
-        logLine(`Failed to send: ${err.message}`, username);
-      }
-    }
+    sendQueue = sendQueue
+      .then(async () => {
+        const targets = Array.from(activeBots.entries());
+        if (!targets.length) {
+          logLine(`No active bots available for: ${message}`);
+          return;
+        }
 
-    logLine(`Broadcast sent to ${sentCount} bot(s): ${message}`);
+        logLine(
+          `Queueing command for ${targets.length} bot(s) with ${sendDelayMs}ms spacing: ${message}`
+        );
+
+        let sentCount = 0;
+        for (let i = 0; i < targets.length; i += 1) {
+          const [username, bot] = targets[i];
+          try {
+            bot.chat(message);
+            sentCount += 1;
+            logLine(`Sent command (${sentCount}/${targets.length}): ${message}`, username);
+          } catch (err) {
+            logLine(`Failed to send: ${err.message}`, username);
+          }
+
+          if (i < targets.length - 1) {
+            await sleep(sendDelayMs);
+          }
+        }
+
+        logLine(`Command completed: sent to ${sentCount}/${targets.length} bot(s): ${message}`);
+      })
+      .catch((err) => {
+        logLine(`Command queue error: ${err.message}`);
+      });
   });
 }
 
 async function main() {
   const config = loadConfig();
   const joinDelay = Number(config.joinDelayMs) || 3000;
+  const consoleCommandDelayMs = Number(config.consoleCommandDelayMs) || 3000;
+  const chatDedupeWindowMs = Number(config.chatDedupeWindowMs) || 1500;
   const activeBots = new Map();
   const joinCoordinator = createJoinCoordinator(joinDelay);
+  const chatRelay = createChatRelay(chatDedupeWindowMs);
 
   logLine(
     `Starting ${config.accounts.length} bot(s) -> ${config.server.host}:${config.server.port || 25565} | version ${config.server.version || "auto"}`
   );
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
-  setupConsoleChat(activeBots);
+  setupConsoleChat(activeBots, consoleCommandDelayMs);
 
   for (let i = 0; i < config.accounts.length; i += 1) {
     logLine(
       `Launching bot ${i + 1}/${config.accounts.length}`,
       config.accounts[i].username
     );
-    createAndManageBot(config.accounts[i], config, activeBots, joinCoordinator);
+    createAndManageBot(config.accounts[i], config, activeBots, joinCoordinator, chatRelay);
   }
 }
 
