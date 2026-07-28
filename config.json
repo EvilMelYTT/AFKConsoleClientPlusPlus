@@ -7,7 +7,7 @@
   "joinDelayMs": 3000,
   "reconnectDelayMs": 5000,
   "consoleCommandDelayMs": 3000,
-  "chatDedupeWindowMs": 1500,
+  "chatDisplayDelayMs": 3000,
   "accountsFile": "usernames.txt",
   "defaultAuth": "offline",
   "afk": {

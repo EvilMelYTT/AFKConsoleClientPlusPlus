@@ -77,33 +77,41 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createChatRelay(dedupeWindowMs = 1500) {
-  const recentMessages = new Map();
+function createChatRelay(displayDelayMs = 3000) {
+  const bufferedMessages = new Map();
+  let flushTimer = null;
 
-  function cleanup(now) {
-    for (const [key, seenAt] of recentMessages.entries()) {
-      if (now - seenAt > dedupeWindowMs) {
-        recentMessages.delete(key);
-      }
+  function flush() {
+    for (const entry of bufferedMessages.values()) {
+      const suffix = entry.count > 1 ? ` (x${entry.count})` : "";
+      logLine(`<${entry.username}> ${entry.message}${suffix}`, "CHAT");
     }
+    bufferedMessages.clear();
+    flushTimer = null;
+  }
+
+  function scheduleFlush() {
+    if (flushTimer) return;
+    flushTimer = setTimeout(flush, displayDelayMs);
   }
 
   function handleChat(username, message) {
-    const now = Date.now();
-    cleanup(now);
-
     const normalizedUser = String(username || "").trim();
     const normalizedMessage = String(message || "").trim();
     if (!normalizedMessage) return;
 
-    const dedupeKey = `${normalizedUser}|${normalizedMessage}`;
-    const seenAt = recentMessages.get(dedupeKey);
-    if (seenAt && now - seenAt <= dedupeWindowMs) {
-      return;
+    const bufferKey = `${normalizedUser}|${normalizedMessage}`;
+    const existing = bufferedMessages.get(bufferKey);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      bufferedMessages.set(bufferKey, {
+        username: normalizedUser,
+        message: normalizedMessage,
+        count: 1
+      });
     }
-
-    recentMessages.set(dedupeKey, now);
-    logLine(`<${normalizedUser}> ${normalizedMessage}`, "CHAT");
+    scheduleFlush();
   }
 
   return {
@@ -327,15 +335,16 @@ async function main() {
   const config = loadConfig();
   const joinDelay = Number(config.joinDelayMs) || 3000;
   const consoleCommandDelayMs = Number(config.consoleCommandDelayMs) || 3000;
-  const chatDedupeWindowMs = Number(config.chatDedupeWindowMs) || 1500;
+  const chatDisplayDelayMs = Number(config.chatDisplayDelayMs) || 3000;
   const activeBots = new Map();
   const joinCoordinator = createJoinCoordinator(joinDelay);
-  const chatRelay = createChatRelay(chatDedupeWindowMs);
+  const chatRelay = createChatRelay(chatDisplayDelayMs);
 
   logLine(
     `Starting ${config.accounts.length} bot(s) -> ${config.server.host}:${config.server.port || 25565} | version ${config.server.version || "auto"}`
   );
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
+  logLine(`Chat display delay: ${chatDisplayDelayMs}ms (duplicates combined)`);
   setupConsoleChat(activeBots, consoleCommandDelayMs);
 
   for (let i = 0; i < config.accounts.length; i += 1) {
