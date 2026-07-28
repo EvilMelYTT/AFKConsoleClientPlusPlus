@@ -77,6 +77,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function runCommandsWithDelay(bot, label, commands, delayMs, logPrefix = "Sent") {
+  if (!Array.isArray(commands) || !commands.length) return;
+  const waitBetweenCommandsMs = Math.max(0, Number(delayMs) || 0);
+
+  for (const command of commands) {
+    if (typeof command !== "string" || !command.trim()) continue;
+    try {
+      if (waitBetweenCommandsMs > 0) {
+        await sleep(waitBetweenCommandsMs);
+      }
+      bot.chat(command);
+      logLine(`${logPrefix}: ${command}`, label);
+    } catch (_) {}
+  }
+}
+
 function createChatRelay(displayDelayMs = 3000) {
   const bufferedMessages = new Map();
   let flushTimer = null;
@@ -206,9 +222,28 @@ function setupAfk(bot, afkConfig) {
   return () => timers.forEach((timer) => clearInterval(timer));
 }
 
+function getPeriodicCommandsConfig(config) {
+  const defaults = {
+    enabled: true,
+    intervalMs: 10 * 60 * 1000,
+    commandDelayMs: 1000,
+    commands: ["/join gamemode"]
+  };
+  const input = config.periodicCommands || {};
+  const parsedCommands = Array.isArray(input.commands)
+    ? input.commands.filter((command) => typeof command === "string" && command.trim())
+    : defaults.commands;
+
+  return {
+    enabled: input.enabled !== false,
+    intervalMs: Math.max(1000, Number(input.intervalMs) || defaults.intervalMs),
+    commandDelayMs: Math.max(0, Number(input.commandDelayMs) || defaults.commandDelayMs),
+    commands: parsedCommands.length ? parsedCommands : defaults.commands
+  };
+}
+
 function createAndManageBot(account, config, activeBots, joinCoordinator, chatRelay) {
   const label = account.username;
-  let hasRunFirstJoinCommands = false;
   const reconnectDelayMs = Number(config.reconnectDelayMs) || 5000;
 
   const connect = (reason = "join attempt") => {
@@ -230,22 +265,15 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
       activeBots.set(label, bot);
       cleanupAfk = setupAfk(bot, config.afk);
 
-      if (
-        !hasRunFirstJoinCommands &&
-        Array.isArray(config.onSpawnCommands) &&
-        config.onSpawnCommands.length
-      ) {
+      if (Array.isArray(config.onSpawnCommands) && config.onSpawnCommands.length) {
         const delayMs = Number(config.onSpawnCommandDelayMs) || 3000;
-        hasRunFirstJoinCommands = true;
-
-        for (const command of config.onSpawnCommands) {
-          if (typeof command !== "string" || !command.trim()) continue;
-          try {
-            await sleep(delayMs);
-            bot.chat(command);
-            logLine(`Sent: ${command}`, label);
-          } catch (_) {}
-        }
+        await runCommandsWithDelay(
+          bot,
+          label,
+          config.onSpawnCommands,
+          delayMs,
+          "Sent on spawn"
+        );
       }
     });
 
@@ -277,6 +305,48 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
   };
 
   joinCoordinator.scheduleJoin(label, "initial join", Date.now(), () => connect("initial join"));
+}
+
+function setupPeriodicCommands(activeBots, periodicCommandsConfig) {
+  if (!periodicCommandsConfig.enabled) {
+    logLine("Periodic commands disabled.");
+    return () => {};
+  }
+
+  let chain = Promise.resolve();
+  const timer = setInterval(() => {
+    chain = chain
+      .then(async () => {
+        const targets = Array.from(activeBots.entries());
+        if (!targets.length) {
+          logLine("Periodic command run skipped (no active bots).");
+          return;
+        }
+
+        logLine(
+          `Running ${periodicCommandsConfig.commands.length} periodic command(s) for ${targets.length} bot(s).`
+        );
+
+        for (const [username, bot] of targets) {
+          await runCommandsWithDelay(
+            bot,
+            username,
+            periodicCommandsConfig.commands,
+            periodicCommandsConfig.commandDelayMs,
+            "Sent periodic command"
+          );
+        }
+      })
+      .catch((err) => {
+        logLine(`Periodic command error: ${err.message}`);
+      });
+  }, periodicCommandsConfig.intervalMs);
+
+  logLine(
+    `Periodic commands enabled: every ${periodicCommandsConfig.intervalMs}ms | ${periodicCommandsConfig.commands.length} command(s).`
+  );
+
+  return () => clearInterval(timer);
 }
 
 function setupConsoleChat(activeBots, sendDelayMs) {
@@ -336,6 +406,7 @@ async function main() {
   const joinDelay = Number(config.joinDelayMs) || 3000;
   const consoleCommandDelayMs = Number(config.consoleCommandDelayMs) || 3000;
   const chatDisplayDelayMs = Number(config.chatDisplayDelayMs) || 3000;
+  const periodicCommandsConfig = getPeriodicCommandsConfig(config);
   const activeBots = new Map();
   const joinCoordinator = createJoinCoordinator(joinDelay);
   const chatRelay = createChatRelay(chatDisplayDelayMs);
@@ -346,6 +417,7 @@ async function main() {
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
   logLine(`Chat display delay: ${chatDisplayDelayMs}ms (duplicates combined)`);
   setupConsoleChat(activeBots, consoleCommandDelayMs);
+  setupPeriodicCommands(activeBots, periodicCommandsConfig);
 
   for (let i = 0; i < config.accounts.length; i += 1) {
     logLine(

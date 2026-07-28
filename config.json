@@ -22,5 +22,13 @@
   "onSpawnCommands": [
     "/register password password",
     "/login password"
-  ]
+  ],
+  "periodicCommands": {
+    "enabled": true,
+    "intervalMs": 600000,
+    "commandDelayMs": 3000,
+    "commands": [
+      "/join gamemode"
+    ]
+  }
 }
