@@ -67,6 +67,19 @@ Examples:
 .checkslot 13 Username1
 ```
 
+### `.rejoin <username>`
+
+Force a bot to leave and rejoin.
+
+- If connected: the bot disconnects, waits for join scheduling rules (`joinDelayMs`), then rejoins and runs `onSpawnCommands` again.
+- If disconnected or never joined yet: it queues a join attempt and runs normal spawn flow on success.
+
+Example:
+
+```text
+.rejoin Username1
+```
+
 ## Config Keys
 
 - `server.host` - server IP/domain

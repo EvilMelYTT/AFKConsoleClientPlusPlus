@@ -275,8 +275,19 @@ function getPeriodicCommandsConfig(config) {
 function createAndManageBot(account, config, activeBots, joinCoordinator, chatRelay) {
   const label = account.username;
   const reconnectDelayMs = Number(config.reconnectDelayMs) || 5000;
+  let currentBot = null;
+  let shouldRejoinAfterEnd = false;
+
+  const queueConnect = (reason, earliestJoinAt = Date.now()) => {
+    joinCoordinator.scheduleJoin(label, reason, earliestJoinAt, () => connect(reason));
+  };
 
   const connect = (reason = "join attempt") => {
+    if (currentBot) {
+      logLine(`Skipped ${reason}: bot is already connected/connecting.`, label);
+      return;
+    }
+
     logLine("Connecting...", label);
 
     const bot = mineflayer.createBot({
@@ -286,6 +297,7 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
       auth: "offline",
       version: config.server.version || false
     });
+    currentBot = bot;
 
     let cleanupAfk = () => {};
 
@@ -320,21 +332,44 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
     });
 
     bot.on("end", () => {
+      if (currentBot === bot) {
+        currentBot = null;
+      }
       cleanupAfk();
       if (activeBots.get(label) === bot) {
         activeBots.delete(label);
       }
-      logLine(`Disconnected. Queueing reconnect (base delay ${reconnectDelayMs}ms)...`, label);
-      joinCoordinator.scheduleJoin(
-        label,
-        "reconnect",
-        Date.now() + reconnectDelayMs,
-        () => connect("reconnect")
-      );
+      if (shouldRejoinAfterEnd) {
+        shouldRejoinAfterEnd = false;
+        logLine("Disconnected. Queueing manual rejoin...", label);
+        queueConnect("manual rejoin", Date.now());
+      } else {
+        logLine(`Disconnected. Queueing reconnect (base delay ${reconnectDelayMs}ms)...`, label);
+        queueConnect("reconnect", Date.now() + reconnectDelayMs);
+      }
     });
   };
 
-  joinCoordinator.scheduleJoin(label, "initial join", Date.now(), () => connect("initial join"));
+  queueConnect("initial join", Date.now());
+
+  return {
+    requestRejoin() {
+      if (currentBot) {
+        shouldRejoinAfterEnd = true;
+        logLine("Manual rejoin requested. Leaving server first...", label);
+        try {
+          currentBot.end("Manual rejoin requested");
+        } catch (err) {
+          shouldRejoinAfterEnd = false;
+          logLine(`Failed to leave for manual rejoin: ${err.message}`, label);
+        }
+        return;
+      }
+
+      logLine("Manual rejoin requested while disconnected. Queueing join...", label);
+      queueConnect("manual rejoin", Date.now());
+    }
+  };
 }
 
 function setupPeriodicCommands(activeBots, periodicCommandsConfig) {
@@ -379,7 +414,7 @@ function setupPeriodicCommands(activeBots, periodicCommandsConfig) {
   return () => clearInterval(timer);
 }
 
-function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs) {
+function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs, botControllers) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -533,13 +568,30 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs) {
       return;
     }
 
+    if (command === ".rejoin") {
+      const username = parts[1];
+      if (!username) {
+        logLine("Usage: .rejoin <username>");
+        return;
+      }
+
+      const controller = botControllers.get(username);
+      if (!controller) {
+        logLine(`No configured account found with username "${username}".`);
+        return;
+      }
+
+      controller.requestRejoin();
+      return;
+    }
+
     logLine(
-      `Unknown local command: ${parts[0]}. Supported: .clickslot, .checkslot, .send`
+      `Unknown local command: ${parts[0]}. Supported: .clickslot, .checkslot, .send, .rejoin`
     );
   }
 
   logLine(
-    `Type a message and press Enter to send from connected bots (staggered ${sendDelayMs}ms per account). Local commands: .clickslot, .checkslot, .send`
+    `Type a message and press Enter to send from connected bots (staggered ${sendDelayMs}ms per account). Local commands: .clickslot, .checkslot, .send, .rejoin`
   );
 
   rl.on("line", (line) => {
@@ -595,6 +647,7 @@ async function main() {
   const chatDisplayDelayMs = toNonNegativeNumber(config.chatDisplayDelayMs, 3000);
   const periodicCommandsConfig = getPeriodicCommandsConfig(config);
   const activeBots = new Map();
+  const botControllers = new Map();
   const joinCoordinator = createJoinCoordinator(joinDelay);
   const chatRelay = createChatRelay(chatDisplayDelayMs);
 
@@ -604,7 +657,7 @@ async function main() {
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
   logLine(`Local .clickslot all-bots delay: ${clickSlotDelayMs}ms`);
   logLine(`Chat display delay: ${chatDisplayDelayMs}ms (duplicates combined)`);
-  setupConsoleChat(activeBots, consoleCommandDelayMs, clickSlotDelayMs);
+  setupConsoleChat(activeBots, consoleCommandDelayMs, clickSlotDelayMs, botControllers);
   setupPeriodicCommands(activeBots, periodicCommandsConfig);
 
   for (let i = 0; i < config.accounts.length; i += 1) {
@@ -612,7 +665,14 @@ async function main() {
       `Launching bot ${i + 1}/${config.accounts.length}`,
       config.accounts[i].username
     );
-    createAndManageBot(config.accounts[i], config, activeBots, joinCoordinator, chatRelay);
+    const controller = createAndManageBot(
+      config.accounts[i],
+      config,
+      activeBots,
+      joinCoordinator,
+      chatRelay
+    );
+    botControllers.set(config.accounts[i].username, controller);
   }
 }
 
