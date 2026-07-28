@@ -1,6 +1,11 @@
 @echo off
 setlocal EnableDelayedExpansion
 
+if /i not "%~1"=="__maximized" (
+  start "" /max "%ComSpec%" /c call "%~f0" __maximized
+  exit /b
+)
+
 cd /d "%~dp0"
 title AFK Console Client
 set "INSTALLED_DEPS=0"
