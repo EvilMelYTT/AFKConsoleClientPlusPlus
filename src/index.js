@@ -864,7 +864,7 @@ async function main() {
     `Starting ${config.accounts.length} bot(s) -> ${config.server.host}:${config.server.port || 25565} | version ${config.server.version || "auto"}`
   );
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
-  logLine(`Batch size: ${batchSize} bots | Batch pause: ${batchPauseMs / 1000}s (5 mins)`);
+  logLine(`Batch size: ${batchSize} bots | Batch pause: ${batchPauseMs / 1000}s`);
   logLine(`Local commands: .send, .clickslot, .checkslot, .rejoin, .rejoinall, .pause, .resume, .stop, .start, .stopall, .startall, .queue, .status, .list`);
   setupConsoleChat(activeBots, consoleCommandDelayMs, clickSlotDelayMs, botControllers, joinCoordinator);
   setupPeriodicCommands(activeBots, periodicCommandsConfig);
