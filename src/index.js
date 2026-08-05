@@ -56,7 +56,13 @@ function loadAccountsFromFile(filePath) {
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
 
-  return lines.map((username) => ({ username }));
+  return lines.map((line) => {
+    if (line.includes(":")) {
+      const parts = line.split(":");
+      return { username: parts[0].trim(), password: parts[1].trim() };
+    }
+    return { username: line, password: "password" };
+  });
 }
 
 function loadConfig() {
@@ -169,10 +175,16 @@ function createJoinCoordinator(joinDelayMs) {
   let chain = Promise.resolve();
   let nextAllowedJoinAt = Date.now();
   let lastSuccessfulJoinAt = 0;
+  let isPaused = false;
+  const pendingQueue = [];
 
   function scheduleJoin(label, reason, earliestJoinAt, connectFn) {
+    const entry = { label, reason, readyAt: Number(earliestJoinAt) || Date.now() };
+    pendingQueue.push(entry);
     chain = chain
       .then(async () => {
+        const idx = pendingQueue.indexOf(entry);
+        if (idx !== -1) pendingQueue.splice(idx, 1);
         const now = Date.now();
         const retryReadyAt = Number(earliestJoinAt) || now;
         const successGateAt = lastSuccessfulJoinAt
@@ -183,7 +195,24 @@ function createJoinCoordinator(joinDelayMs) {
 
         if (waitMs > 0) {
           logLine(`Waiting ${waitMs}ms before ${reason}`, label);
-          await sleep(waitMs);
+          let waited = 0;
+          while (waited < waitMs) {
+            if (isPaused) {
+              logLine(`Join queue is PAUSED. Type .resume to continue launching bots.`, label);
+              while (isPaused) {
+                await sleep(1000);
+              }
+              logLine(`Resuming join queue...`, label);
+            }
+            const step = Math.min(1000, waitMs - waited);
+            await sleep(step);
+            waited += step;
+          }
+        }
+
+        while (isPaused) {
+          logLine(`Join queue is PAUSED. Type .resume to continue launching bots.`, label);
+          await sleep(2000);
         }
 
         nextAllowedJoinAt = Date.now() + joinDelayMs;
@@ -201,9 +230,24 @@ function createJoinCoordinator(joinDelayMs) {
     nextAllowedJoinAt = Math.max(nextAllowedJoinAt, lastSuccessfulJoinAt + joinDelayMs);
   }
 
+  function setPaused(val) {
+    isPaused = !!val;
+  }
+
+  function getPaused() {
+    return isPaused;
+  }
+
+  function getQueue() {
+    return pendingQueue.slice();
+  }
+
   return {
     scheduleJoin,
-    markSuccessfulJoin
+    markSuccessfulJoin,
+    setPaused,
+    getPaused,
+    getQueue
   };
 }
 
@@ -277,6 +321,7 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
   const reconnectDelayMs = Number(config.reconnectDelayMs) || 5000;
   let currentBot = null;
   let shouldRejoinAfterEnd = false;
+  let isDisabled = false;
 
   const queueConnect = (reason, earliestJoinAt = Date.now()) => {
     joinCoordinator.scheduleJoin(label, reason, earliestJoinAt, () => connect(reason));
@@ -309,18 +354,30 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
 
       if (Array.isArray(config.onSpawnCommands) && config.onSpawnCommands.length) {
         const delayMs = Number(config.onSpawnCommandDelayMs) || 3000;
-        await runCommandsWithDelay(
-          bot,
-          label,
-          config.onSpawnCommands,
-          delayMs,
-          "Sent on spawn"
-        );
+        const formattedCommands = config.onSpawnCommands.map(cmd => {
+          if (cmd === "/login" || cmd.startsWith("/login ")) {
+            return `/login ${account.password || "password"}`;
+          }
+          return cmd;
+        });
+
+        for (const command of formattedCommands) {
+          if (!currentBot || currentBot !== bot) break;
+          await sleep(delayMs);
+          if (!currentBot || currentBot !== bot) break;
+          try {
+            bot.chat(command);
+            logLine(`Sent on spawn: ${command}`, label);
+          } catch (err) {
+            break;
+          }
+        }
       }
     });
 
     bot.on("kicked", (reason) => {
-      logLine(`Kicked: ${reason}`, label);
+      const reasonStr = typeof reason === "object" ? JSON.stringify(reason) : reason;
+      logLine(`Kicked: ${reasonStr}`, label);
     });
 
     bot.on("error", (err) => {
@@ -338,6 +395,10 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
       cleanupAfk();
       if (activeBots.get(label) === bot) {
         activeBots.delete(label);
+      }
+      if (isDisabled) {
+        logLine("Bot stopped. Auto-reconnect disabled. Use .start to re-enable.", label);
+        return;
       }
       if (shouldRejoinAfterEnd) {
         shouldRejoinAfterEnd = false;
@@ -368,6 +429,31 @@ function createAndManageBot(account, config, activeBots, joinCoordinator, chatRe
 
       logLine("Manual rejoin requested while disconnected. Queueing join...", label);
       queueConnect("manual rejoin", Date.now());
+    },
+    stop() {
+      isDisabled = true;
+      if (currentBot) {
+        logLine("Stopping bot and disabling auto-reconnect...", label);
+        try {
+          currentBot.end("Manually stopped");
+        } catch (err) {
+          logLine(`Error stopping bot: ${err.message}`, label);
+        }
+      } else {
+        logLine("Bot is not connected. Auto-reconnect disabled.", label);
+      }
+    },
+    start() {
+      if (!isDisabled) {
+        logLine("Bot is already active.", label);
+        return;
+      }
+      isDisabled = false;
+      logLine("Re-enabled. Queueing connect...", label);
+      queueConnect("manual start", Date.now());
+    },
+    isStopped() {
+      return isDisabled;
     }
   };
 }
@@ -414,7 +500,7 @@ function setupPeriodicCommands(activeBots, periodicCommandsConfig) {
   return () => clearInterval(timer);
 }
 
-function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs, botControllers) {
+function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs, botControllers, joinCoordinator) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
@@ -568,6 +654,22 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs, botControll
       return;
     }
 
+    if (command === ".pause") {
+      if (joinCoordinator) {
+        joinCoordinator.setPaused(true);
+        logLine("Queue PAUSE requested. Currently active accounts will finish, but no new accounts will launch until .resume is typed.", "SYSTEM");
+      }
+      return;
+    }
+
+    if (command === ".resume") {
+      if (joinCoordinator) {
+        joinCoordinator.setPaused(false);
+        logLine("Queue RESUMED. Launching next scheduled accounts...", "SYSTEM");
+      }
+      return;
+    }
+
     if (command === ".rejoin") {
       const username = parts[1];
       if (!username) {
@@ -585,13 +687,118 @@ function setupConsoleChat(activeBots, sendDelayMs, clickSlotDelayMs, botControll
       return;
     }
 
+    if (command === ".stop") {
+      const username = parts[1];
+      if (!username) {
+        logLine("Usage: .stop <username>");
+        return;
+      }
+      const controller = botControllers.get(username);
+      if (!controller) {
+        logLine(`No configured account found with username "${username}".`);
+        return;
+      }
+      controller.stop();
+      return;
+    }
+
+    if (command === ".start") {
+      const username = parts[1];
+      if (!username) {
+        logLine("Usage: .start <username>");
+        return;
+      }
+      const controller = botControllers.get(username);
+      if (!controller) {
+        logLine(`No configured account found with username "${username}".`);
+        return;
+      }
+      controller.start();
+      return;
+    }
+
+    if (command === ".queue") {
+      const queue = joinCoordinator ? joinCoordinator.getQueue() : [];
+      if (!queue.length) {
+        logLine("Join queue is empty.");
+        return;
+      }
+      logLine(`Queue — ${queue.length} pending:`);
+      for (let i = 0; i < queue.length; i++) {
+        logLine(`  ${i + 1}. ${queue[i].label} — ${queue[i].reason}`);
+      }
+      return;
+    }
+
+    if (command === ".status") {
+      const active = activeBots.size;
+      const queued = joinCoordinator ? joinCoordinator.getQueue().length : 0;
+      const total = botControllers.size;
+      const stopped = Array.from(botControllers.values()).filter(c => c.isStopped()).length;
+      logLine(`Active: ${active} | Queued: ${queued} | Stopped: ${stopped} | Total: ${total}`);
+      return;
+    }
+
+    if (command === ".list") {
+      const mode = (parts[1] || "active").toLowerCase();
+      if (mode !== "active" && mode !== "stopped" && mode !== "all") {
+        logLine("Usage: .list [active|stopped|all]");
+        return;
+      }
+      if (mode === "active" || mode === "all") {
+        const names = Array.from(activeBots.keys());
+        logLine(`Active (${names.length}): ${names.join(", ") || "none"}`);
+      }
+      if (mode === "stopped" || mode === "all") {
+        const names = Array.from(botControllers.entries()).filter(([, c]) => c.isStopped()).map(([u]) => u);
+        logLine(`Stopped (${names.length}): ${names.join(", ") || "none"}`);
+      }
+      return;
+    }
+
+    if (command === ".stopall") {
+      let count = 0;
+      for (const controller of botControllers.values()) {
+        if (!controller.isStopped()) {
+          controller.stop();
+          count++;
+        }
+      }
+      logLine(`Stopped ${count} bot(s). Auto-reconnect disabled for all.`, "SYSTEM");
+      return;
+    }
+
+    if (command === ".startall") {
+      let count = 0;
+      for (const controller of botControllers.values()) {
+        if (controller.isStopped()) {
+          controller.start();
+          count++;
+        }
+      }
+      logLine(`Re-enabled ${count} stopped bot(s).`, "SYSTEM");
+      return;
+    }
+
+    if (command === ".rejoinall") {
+      let count = 0;
+      for (const controller of botControllers.values()) {
+        if (!controller.isStopped()) {
+          controller.requestRejoin();
+          count++;
+        }
+      }
+      logLine(`Rejoin requested for ${count} bot(s).`, "SYSTEM");
+      return;
+    }
+
     logLine(
-      `Unknown local command: ${parts[0]}. Supported: .clickslot, .checkslot, .send, .rejoin`
+      `Unknown local command: ${parts[0]}. Supported: .send, .clickslot, .checkslot, .rejoin, .rejoinall, .pause, .resume, .stop, .start, .stopall, .startall, .queue, .status, .list`
     );
   }
 
   logLine(
-    `Type a message and press Enter to send from connected bots (staggered ${sendDelayMs}ms per account). Local commands: .clickslot, .checkslot, .send, .rejoin`
+    `Type a message and press Enter to send from connected bots. Local commands: .send, .clickslot, .checkslot, .rejoin, .rejoinall, .pause, .resume, .stop, .start, .stopall, .startall, .queue, .status, .list`
   );
 
   rl.on("line", (line) => {
@@ -645,6 +852,8 @@ async function main() {
   const consoleCommandDelayMs = toNonNegativeNumber(config.consoleCommandDelayMs, 3000);
   const clickSlotDelayMs = toNonNegativeNumber(config.clickSlotDelayMs, 1000);
   const chatDisplayDelayMs = toNonNegativeNumber(config.chatDisplayDelayMs, 3000);
+  const batchSize = toNonNegativeNumber(config.batchSize, 10);
+  const batchPauseMs = toNonNegativeNumber(config.batchPauseMs, 300000);
   const periodicCommandsConfig = getPeriodicCommandsConfig(config);
   const activeBots = new Map();
   const botControllers = new Map();
@@ -655,9 +864,9 @@ async function main() {
     `Starting ${config.accounts.length} bot(s) -> ${config.server.host}:${config.server.port || 25565} | version ${config.server.version || "auto"}`
   );
   logLine(`Join delay: ${joinDelay}ms | Reconnect: ${config.reconnectDelayMs || 5000}ms`);
-  logLine(`Local .clickslot all-bots delay: ${clickSlotDelayMs}ms`);
-  logLine(`Chat display delay: ${chatDisplayDelayMs}ms (duplicates combined)`);
-  setupConsoleChat(activeBots, consoleCommandDelayMs, clickSlotDelayMs, botControllers);
+  logLine(`Batch size: ${batchSize} bots | Batch pause: ${batchPauseMs / 1000}s (5 mins)`);
+  logLine(`Local commands: .send, .clickslot, .checkslot, .rejoin, .rejoinall, .pause, .resume, .stop, .start, .stopall, .startall, .queue, .status, .list`);
+  setupConsoleChat(activeBots, consoleCommandDelayMs, clickSlotDelayMs, botControllers, joinCoordinator);
   setupPeriodicCommands(activeBots, periodicCommandsConfig);
 
   for (let i = 0; i < config.accounts.length; i += 1) {
@@ -673,6 +882,22 @@ async function main() {
       chatRelay
     );
     botControllers.set(config.accounts[i].username, controller);
+
+    if (batchSize > 0 && (i + 1) % batchSize === 0 && i < config.accounts.length - 1) {
+      logLine(
+        `Batch of ${batchSize} bots launched (${i + 1}/${config.accounts.length}). Pausing for ${batchPauseMs / 1000}s (5 minutes) before next batch...`,
+        "SYSTEM"
+      );
+      let remaining = batchPauseMs;
+      while (remaining > 0) {
+        if (joinCoordinator.getPaused()) {
+          logLine("Batch pause superseded by manual .pause command", "SYSTEM");
+          break;
+        }
+        await sleep(Math.min(2000, remaining));
+        remaining -= 2000;
+      }
+    }
   }
 }
 
