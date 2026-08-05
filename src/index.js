@@ -885,7 +885,7 @@ async function main() {
 
     if (batchSize > 0 && (i + 1) % batchSize === 0 && i < config.accounts.length - 1) {
       logLine(
-        `Batch of ${batchSize} bots launched (${i + 1}/${config.accounts.length}). Pausing for ${batchPauseMs / 1000}s (5 minutes) before next batch...`,
+        `Batch of ${batchSize} bots launched (${i + 1}/${config.accounts.length}). Pausing for ${batchPauseMs / 1000}s`,
         "SYSTEM"
       );
       let remaining = batchPauseMs;
